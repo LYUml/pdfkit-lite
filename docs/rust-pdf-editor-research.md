@@ -35,7 +35,7 @@ Linux" are exactly where PDFium hurts.
 | Dimension | Pure Rust (hayro + lopdf) | PDFium |
 | --- | --- | --- |
 | Dependencies | Zero C, `cargo build` and done | Must ship or compile a C++ library per platform |
-| Size | Core 2.6 MB; 20.5 MB with GUI | libpdfium alone is 8 MB+ |
+| Size | Core 2.6 MB; 38.5 MB with GUI (LTO + strip) | libpdfium alone is 8 MB+ |
 | Static linking | Possible, single file | Difficult |
 | Cross-platform CI | One cross-compile (verified) | Three toolchains, prebuilt artifacts |
 | Rendering maturity | Young (0.8); no encryption or blend modes | Industrial, powers Chrome |
@@ -268,6 +268,29 @@ code. Do not bundle the pandoc binary in installers unless willing to meet GPL
 distribution terms.
 
 ---
+
+## 6.5 Binary size
+
+The Typst dependency tree pushes an unstripped release build to 62.8 MB, which is not
+"lightweight" by any measure. Release settings close most of the gap:
+
+```toml
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+```
+
+| Build | Binary |
+| --- | --- |
+| Default release | 62.8 MB |
+| `strip` only | 50.3 MB |
+| LTO + `codegen-units = 1` + `strip` + `panic = "abort"` | 38.5 MB |
+
+Behaviour is unchanged: tests pass and the same document renders identically under
+Apple's renderer after the switch. If size matters more than startup time later, the next
+lever is compiling Typst features selectively rather than all of them.
 
 ## 7. Risks and mitigations
 

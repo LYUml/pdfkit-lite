@@ -34,3 +34,12 @@ egui = "0.37"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+
+# Keep the binary small: this is a "lightweight like Preview" app, and the Typst
+# dependency tree is heavy by default. LTO and symbol stripping cut roughly a third.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
