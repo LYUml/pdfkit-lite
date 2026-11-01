@@ -124,6 +124,8 @@ struct App {
     fonts: FontSet,
     /// The stroke being drawn with the Sign tool, in visible page coordinates.
     current_stroke: Option<Vec<egui::Pos2>>,
+    /// Index of the text annotation currently being edited inline.
+    editing_text: Option<usize>,
 }
 
 impl App {
@@ -147,6 +149,7 @@ impl App {
             // Loading fonts is slow (tens of MB), so do it once at startup.
             fonts: FontSet::from_files(&system_font_candidates()),
             current_stroke: None,
+            editing_text: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -534,6 +537,9 @@ impl eframe::App for App {
 
             let page_now = *page_no;
             let mut toggle: Option<usize> = None;
+            let mut editing_text: Option<usize> = self.editing_text;
+            let mut text_edit: Option<(usize, String)> = None;
+            let mut finish_text = false;
             for (i, item) in self.placed.iter().enumerate() {
                 if item.page != page_now {
                     continue;
@@ -582,15 +588,58 @@ impl eframe::App for App {
                         }
                     }
                     PlacedKind::Text { text } => {
-                        ui.painter()
-                            .rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 235));
-                        ui.painter().text(
-                            r.min + egui::vec2(2.0, 2.0),
-                            egui::Align2::LEFT_TOP,
-                            text,
-                            egui::FontId::proportional(11.0),
-                            egui::Color32::BLACK,
+                        // A lightweight inline editor: double-click to edit, Enter or click
+                        // away to commit. The widget is placed over the annotation box and
+                        // sized to it, so what you see matches what gets typeset.
+                        let editor_rect = egui::Rect::from_min_size(
+                            r.min,
+                            egui::vec2(r.width().max(120.0), 22.0),
                         );
+                        if editing_text == Some(i) {
+                            let mut buf = text.clone();
+                            let out = ui.put(
+                                editor_rect,
+                                egui::TextEdit::singleline(&mut buf)
+                                    .font(egui::FontId::proportional(12.0))
+                                    .background_color(egui::Color32::from_rgba_unmultiplied(255, 255, 240, 245))
+                                    .hint_text("Type annotation text"),
+                            );
+                            if buf != *text {
+                                text_edit = Some((i, buf));
+                            }
+                            if out.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                finish_text = true;
+                            }
+                            // Enter alone also commits, even without losing focus first.
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                finish_text = true;
+                            }
+                            out.request_focus();
+                        } else {
+                            let inner = ui.painter();
+                            inner.rect_filled(
+                                r,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+                            );
+                            inner.text(
+                                r.min + egui::vec2(2.0, 2.0),
+                                egui::Align2::LEFT_TOP,
+                                if text.is_empty() { "(empty)" } else { text },
+                                egui::FontId::proportional(11.0),
+                                egui::Color32::BLACK,
+                            );
+                            let resp = ui.interact(
+                                editor_rect,
+                                ui.scope_id().with(("txt", i)),
+                                egui::Sense::click(),
+                            );
+                            if resp.double_clicked() {
+                                editing_text = Some(i);
+                            }
+                        }
                     }
                 }
             }
@@ -599,6 +648,15 @@ impl eframe::App for App {
                     *checked = !*checked;
                 }
             }
+            if let Some((i, buf)) = text_edit {
+                if let Some(Placed { kind: PlacedKind::Text { text }, .. }) = self.placed.get_mut(i) {
+                    *text = buf;
+                }
+            }
+            if finish_text {
+                editing_text = None;
+            }
+            self.editing_text = editing_text;
 
             // Signing: drag to draw a stroke; releasing seals it into an annotation.
             if self.tool == Tool::Sign {
@@ -638,9 +696,7 @@ impl eframe::App for App {
                         Tool::Text => self.placed.push(Placed {
                             page: page_now,
                             rect: egui::Rect::from_min_size(top_left, egui::vec2(180.0, 22.0)),
-                            kind: PlacedKind::Text {
-                                text: "Signature checked 2026-11-01".to_owned(),
-                            },
+                            kind: PlacedKind::Text { text: String::new() },
                         }),
                         Tool::Select | Tool::Sign => {}
                     }
