@@ -3561,8 +3561,10 @@ dependencies = [
  "eframe",
  "egui",
  "lopdf",
+ "pdf-annot",
  "pdf-doc",
  "pdf-render",
+ "pdf-typeset",
 ]
 
 [[package]]

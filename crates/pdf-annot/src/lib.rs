@@ -15,7 +15,7 @@
 //! 5. Appearance coordinates are PDF user space (origin bottom-left, y up) while a UI is
 //!    usually top-left origin with y down. Convert once, at the boundary.
 
-use lopdf::{Dictionary, Object, Stream};
+use lopdf::{Dictionary, Object, Stream, dictionary};
 
 /// A rectangle in PDF user space.
 pub type Rect = [f32; 4];
@@ -51,14 +51,14 @@ impl PendingAnnotation {
     /// Attach the appearance as an indirect reference.
     pub fn into_dictionary(self, form_id: lopdf::ObjectId) -> Dictionary {
         let mut dict = self.dict;
-        dict.set("AP", lopdf::dictionary! { "N" => Object::Reference(form_id) });
+        dict.set("AP", dictionary! { "N" => Object::Reference(form_id) });
         dict
     }
 }
 
 fn form_stream(width: f32, height: f32, content: String) -> Stream {
     Stream::new(
-        lopdf::dictionary! {
+        dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
             "BBox" => Object::Array(vec![
@@ -115,7 +115,7 @@ pub fn checkbox(rect: Rect, checked: bool, ink: [f32; 3]) -> PendingAnnotation {
     }
 
     PendingAnnotation {
-        dict: lopdf::dictionary! {
+        dict: dictionary! {
             "Type" => "Annot",
             "Subtype" => "Square",
             "Rect" => rect_object(rect),
@@ -142,7 +142,7 @@ pub fn free_text_with_appearance(
     da: &str,
 ) -> PendingAnnotation {
     let mut stream = Stream::new(
-        lopdf::dictionary! {
+        dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
             "BBox" => Object::Array(vec![
@@ -167,7 +167,7 @@ pub fn free_text_with_appearance(
     };
 
     PendingAnnotation {
-        dict: lopdf::dictionary! {
+        dict: dictionary! {
             "Type" => "Annot",
             "Subtype" => "FreeText",
             "Rect" => rect_object(rect),

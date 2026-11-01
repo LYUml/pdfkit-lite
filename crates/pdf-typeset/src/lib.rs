@@ -8,6 +8,9 @@
 //! annotation can reference as its appearance (`/AP /N`).
 
 
+mod merge;
+pub use merge::{MergeError, MergedAppearance, merge_first_page};
+
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -82,6 +85,58 @@ impl FontSet {
     fn preferred_family(&self) -> Option<String> {
         self.families().into_iter().next()
     }
+}
+
+/// Fonts to try, in priority order: bundled open-source faces first, then the system.
+///
+/// Bundled faces are redistributable inside the generated PDFs; system fonts usually are
+/// not, so they are a convenience fallback rather than the default.
+pub fn system_font_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    // 1. Fonts shipped next to the executable or in a `fonts/` directory.
+    for dir in [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("fonts"))),
+        Some(std::path::PathBuf::from("fonts")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut found: Vec<_> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some("ttf" | "otf" | "ttc" | "otc")
+                    )
+                })
+                .collect();
+            found.sort();
+            out.extend(found);
+        }
+    }
+    // 2. Platform fallbacks.
+    #[cfg(target_os = "macos")]
+    {
+        out.push("/System/Library/Fonts/STHeiti Light.ttc".into());
+        out.push("/System/Library/Fonts/Hiragino Sans GB.ttc".into());
+        out.push("/System/Library/Fonts/Supplemental/Arial Unicode.ttf".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        out.push("C:\\Windows\\Fonts\\msyh.ttc".into());
+        out.push("C:\\Windows\\Fonts\\simhei.ttf".into());
+        out.push("C:\\Windows\\Fonts\\arial.ttf".into());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        out.push("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into());
+        out.push("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into());
+    }
+    out
 }
 
 /// A single-page document produced by the typesetter, ready to become a form XObject.
@@ -173,7 +228,7 @@ pub fn typeset(
     // `height: auto` lets the page grow to fit the text; width is fixed by the caller.
     let src = format!(
         concat!(
-            "#set page(width: {w}pt, height: auto, margin: 0pt, fill: none)\n",
+            "#set page(width: {w}pt, height: auto, margin: 0pt, fill: none, background: none)\n",
             "#set text(font: \"{family}\", size: {size}pt, fill: rgb({r}, {g}, {b}))\n",
             "#set par(leading: 0.6em, justify: false)\n",
             "{body}\n",
@@ -181,9 +236,10 @@ pub fn typeset(
         w = width_pt,
         family = family.replace('"', ""),
         size = font_size,
-        r = color[0],
-        g = color[1],
-        b = color[2],
+        // Typst's rgb() takes integers 0-255 or ratios, never floats: convert here.
+        r = (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        g = (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        b = (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
         body = escape_markup(text),
     );
 

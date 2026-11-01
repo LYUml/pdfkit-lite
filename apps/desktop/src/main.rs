@@ -5,10 +5,14 @@
 
 use eframe::egui;
 use pdf_doc::{PageBox, PdfDocument};
+use pdf_typeset::{FontSet, system_font_candidates};
 use pdf_render::RenderedPage;
 use pdf_render::worker::{self, RenderRequest, RenderResult};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
+
+/// Ink used for annotation artwork and text.
+const INK: [f32; 3] = [0.10, 0.10, 0.10];
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -20,7 +24,8 @@ fn main() -> eframe::Result<()> {
         let bytes = std::fs::read(&src).expect("read input");
         let mut doc = PdfDocument::from_bytes(bytes).expect("parse input");
         let placed = demo_annotations(&doc);
-        write_annotations(&mut doc, &placed).expect("write annotations");
+        let fonts = FontSet::from_files(&system_font_candidates());
+        write_annotations(&mut doc, &placed, &fonts).expect("write annotations");
         doc.save_to(&out).expect("save");
         println!("selftest ok -> {} ({} annotations)", out.display(), placed.len());
         return Ok(());
@@ -103,6 +108,7 @@ struct App {
     displayed: Option<(usize, RenderedPage)>,
     status: String,
     path: Option<PathBuf>,
+    fonts: FontSet,
 }
 
 impl App {
@@ -123,6 +129,8 @@ impl App {
             displayed: None,
             status: "Open a PDF to begin".to_owned(),
             path: None,
+            // Loading fonts is slow (tens of MB), so do it once at startup.
+            fonts: FontSet::from_files(&system_font_candidates()),
         };
         if let Some(p) = path {
             app.open(p);
@@ -208,7 +216,7 @@ impl App {
         let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let out = src.with_file_name(format!("{stem}-edited.pdf"));
 
-        if let Err(e) = write_annotations(doc, &self.placed) {
+        if let Err(e) = write_annotations(doc, &self.placed, &self.fonts) {
             self.status = format!("Could not write annotations: {e}");
             return;
         }
@@ -245,52 +253,96 @@ fn demo_annotations(doc: &PdfDocument) -> Vec<Placed> {
                 egui::vec2(w.min(300.0), 22.0),
             ),
             kind: PlacedKind::Text {
-                text: "Signature checked 2026-11-01".to_owned(),
+                // CJK + Latin on purpose: this exercises the embedded-subset-font path.
+                text: std::env::var("SELFTEST_TEXT")
+                    .unwrap_or_else(|_| "Signature checked 2026-11-01".to_owned()),
             },
         },
     ]
 }
 
 /// Turn `Placed` items into standard PDF annotations on the matching page.
-fn write_annotations(doc: &mut PdfDocument, placed: &[Placed]) -> Result<(), String> {
+/// Turn placed items into standard PDF annotations on the matching page.
+fn write_annotations(
+    doc: &mut PdfDocument,
+    placed: &[Placed],
+    fonts: &FontSet,
+) -> Result<(), String> {
     for item in placed {
         let Some(page_box) = doc.page_box(item.page) else {
             continue;
         };
         let (x0, y1) = page_box.visible_to_user(item.rect.min.x, item.rect.max.y);
         let (x1, y0) = page_box.visible_to_user(item.rect.max.x, item.rect.min.y);
-        let rect = [x0, y0, x1, y1];
+        let rect = pdf_annot::normalize([x0, y0, x1, y1]);
         let page_id = doc
             .page_id(item.page)
             .ok_or_else(|| format!("page {} missing", item.page))?;
-        let dict = match &item.kind {
-            PlacedKind::Checkbox { checked } => checker_annotation(rect, *checked),
-            PlacedKind::Text { text } => text_annotation(rect, text),
-        };
-        push_annotation(doc, page_id, dict);
+
+        match &item.kind {
+            PlacedKind::Checkbox { checked } => {
+                let pending = pdf_annot::checkbox(rect, *checked, INK);
+                attach(doc, page_id, pending, None);
+            }
+            PlacedKind::Text { text } => {
+                let width = (rect[2] - rect[0]).max(40.0);
+                // Typeset the text with Typst: this is what makes CJK work, because the
+                // output carries an embedded, subset font.
+                let page = pdf_typeset::typeset(fonts, text, width, 11.0, INK)
+                    .map_err(|e| format!("typesetting failed: {e}"))?;
+                let merged = pdf_typeset::merge_first_page(doc.document_mut(), &page.pdf)
+                    .map_err(|e| format!("could not embed text appearance: {e}"))?;
+                // Grow the annotation to fit the typeset block.
+                let height = merged.height.max(12.0);
+                let fitted = [rect[0], rect[3] - height, rect[2], rect[3]];
+                let pending = pdf_annot::free_text_with_appearance(
+                    fitted,
+                    text,
+                    (merged.width, merged.height),
+                    Vec::new(),
+                    lopdf::Dictionary::new(),
+                    "0 g /Helv 11 Tf",
+                );
+                attach(doc, page_id, pending, Some(merged.form_id));
+            }
+        }
     }
     Ok(())
 }
 
-fn push_annotation(doc: &mut PdfDocument, page_id: lopdf::ObjectId, mut annot: lopdf::Dictionary) {
+/// Register an annotation, using `form_id` as its appearance when the appearance was
+/// already built elsewhere (e.g. merged from Typst).
+fn attach(
+    doc: &mut PdfDocument,
+    page_id: lopdf::ObjectId,
+    pending: pdf_annot::PendingAnnotation,
+    form_id: Option<lopdf::ObjectId>,
+) {
     use lopdf::Object;
-    // Promote the deferred appearance stream to a top-level object so /AP /N can reference
-    // it. Inline streams inside /AP are ignored by some renderers.
-    if let Some(Object::Stream(stream)) = annot.remove(b"__form__") {
-        let form_id = doc.document_mut().add_object(stream);
-        annot.set("AP", lopdf::dictionary! { "N" => Object::Reference(form_id) });
-    }
+    let pdf_annot::PendingAnnotation { dict, form } = pending;
+    let form_id = match form_id {
+        Some(id) => id,
+        None => doc.document_mut().add_object(form),
+    };
+    // /AP must be an indirect reference; an inline stream is ignored by some viewers.
+    let annot = {
+        let mut dict = dict;
+        dict.set(
+            "AP",
+            lopdf::dictionary! { "N" => lopdf::Object::Reference(form_id) },
+        );
+        dict
+    };
     let id = doc.document_mut().add_object(annot);
     let d = doc.document_mut();
-    let page = match d.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) {
-        Ok(p) => p,
-        Err(_) => return,
+    let Ok(page) = d.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) else {
+        return;
     };
-    let existing = page
+    match page
         .get_mut(b"Annots")
         .ok()
-        .and_then(|o| o.as_array_mut().ok());
-    match existing {
+        .and_then(|o| o.as_array_mut().ok())
+    {
         Some(arr) => arr.push(Object::Reference(id)),
         None => {
             page.set("Annots", Object::Array(vec![Object::Reference(id)]));
@@ -298,142 +350,6 @@ fn push_annotation(doc: &mut PdfDocument, page_id: lopdf::ObjectId, mut annot: l
     }
 }
 
-/// Normalise a rectangle so that `x0 <= x1` and `y0 <= y1`, as `/Rect` requires.
-fn normalize(rect: [f32; 4]) -> [f32; 4] {
-    [
-        rect[0].min(rect[2]),
-        rect[1].min(rect[3]),
-        rect[0].max(rect[2]),
-        rect[1].max(rect[3]),
-    ]
-}
-
-/// Append one thick line segment as a filled quad: `to` shifted by ±t perpendicular.
-fn push_leg(content: &mut String, from: (f32, f32), to: (f32, f32), t: f32) {
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-    let (nx, ny) = (-dy / len * t, dx / len * t);
-    content.push_str(&format!(
-        "{a0} {b0} m {a1} {b1} l {a2} {b2} l {a3} {b3} l h f\n",
-        a0 = from.0 + nx, b0 = from.1 + ny,
-        a1 = to.0 + nx,   b1 = to.1 + ny,
-        a2 = to.0 - nx,   b2 = to.1 - ny,
-        a3 = from.0 - nx, b3 = from.1 - ny,
-    ));
-}
-
-
-fn rect_object(r: [f32; 4]) -> lopdf::Object {
-    use lopdf::Object;
-    let r = normalize(r);
-    Object::Array(vec![r[0].into(), r[1].into(), r[2].into(), r[3].into()])
-}
-
-/// A checkbox: a standard `Square` annotation whose appearance stream draws the box and,
-/// when checked, a tick. Preview and Acrobat both render `/AP`.
-fn checker_annotation(rect: [f32; 4], checked: bool) -> lopdf::Dictionary {
-    use lopdf::dictionary;
-    let w = (rect[2] - rect[0]).abs().max(1.0);
-    let h = (rect[3] - rect[1]).abs().max(1.0);
-    let mut content = String::new();
-    // White fill, then a stroked border. Keep the fill and stroke in separate blocks:
-    // a viewer that ignores the stroke colour would otherwise flood the box.
-    content.push_str(&format!("q 1 1 1 rg 0 0 {w} {h} re f Q\n"));
-    let inset = 0.6f32.min(w / 4.0).min(h / 4.0);
-    content.push_str(&format!(
-        "q 0.15 0.45 0.90 RG 1.4 w {inset} {inset} {bw} {bh} re S Q\n",
-        bw = (w - 2.0 * inset).max(0.1),
-        bh = (h - 2.0 * inset).max(0.1)
-    ));
-    if checked {
-        // Tick drawn as two filled quads, inset so it stays inside the border.
-        // A stroked polyline was unreliable across viewers; filled paths are universal.
-        // Appearance streams use PDF user space (origin bottom-left, y up). A tick reads
-        // correctly when its long arm ends at the TOP-RIGHT, i.e. large y.
-        let pad = 0.18 * w.max(h);
-        let (ax, ay) = (pad, h * 0.48);
-        let (bx, by) = (w * 0.36, pad);
-        let (cx, cy) = (w - pad, h - pad);
-        let t = 0.085 * w.max(h);
-        content.push_str("q 0.05 0.40 0.15 rg\n");
-        push_leg(&mut content, (ax, ay), (bx, by), t);
-        push_leg(&mut content, (bx, by), (cx, cy), t);
-        content.push_str("Q\n");
-    }
-    let mut stream = lopdf::Stream::new(
-        dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
-            "BBox" => rect_object([0.0, 0.0, w, h]),
-            "Resources" => lopdf::Dictionary::new(),
-            "FormType" => 1,
-        },
-        content.into_bytes(),
-    );
-    // A direct (inline) stream inside /AP /N is ignored by several viewers. Emit the form
-    // as a top-level object and reference it instead.
-    stream.dict.set("__deferred__", lopdf::Object::Null);
-    dictionary! {
-        "Type" => "Annot",
-        "Subtype" => "Square",
-        "Rect" => rect_object(rect),
-        "F" => 4,
-        "C" => lopdf::Object::Array(vec![0.1f32.into(), 0.55f32.into(), 0.25f32.into()]),
-        "Contents" => lopdf::Object::string_literal(if checked { "checked" } else { "unchecked" }),
-        "__form__" => lopdf::Object::Stream(stream),
-    }
-}
-
-/// A `FreeText` annotation carrying the user's text.
-///
-/// Milestone 1 draws the appearance with Helvetica, which is ASCII-only. CJK needs an
-/// embedded subset font and is the next milestone; the UI warns about non-ASCII text.
-fn text_annotation(rect: [f32; 4], text: &str) -> lopdf::Dictionary {
-    use lopdf::dictionary;
-    let is_ascii = text.is_ascii();
-    let contents = if is_ascii {
-        lopdf::Object::string_literal(text)
-    } else {
-        let mut bytes = vec![0xFEu8, 0xFF];
-        for unit in text.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_be_bytes());
-        }
-        lopdf::Object::String(bytes, lopdf::StringFormat::Hexadecimal)
-    };
-    let h = (rect[3] - rect[1]).abs().max(12.0);
-    let w = (rect[2] - rect[0]).abs().max(40.0);
-    let esc = text
-        .replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)");
-    let body = format!(
-        "q 1 1 1 rg 0 0 {w} {h} re f 0.2 0.2 0.2 RG 0.5 w 0 0 {w} {h} re S Q\n\
-         BT /Helv 11 Tf 0.1 0.1 0.1 rg 2 {ty} Td ({esc}) Tj ET\n",
-        ty = h / 2.0 - 4.0
-    );
-    let stream = lopdf::Stream::new(
-        dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
-            "BBox" => rect_object([0.0, 0.0, w, h]),
-            "Resources" => dictionary! { "Font" => dictionary! { "Helv" => dictionary! {
-                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding"
-            }}},
-            "FormType" => 1,
-        },
-        body.into_bytes(),
-    );
-    dictionary! {
-        "Type" => "Annot",
-        "Subtype" => "FreeText",
-        "Rect" => rect_object(rect),
-        "F" => 4,
-        "DA" => lopdf::Object::string_literal("0 g /Helv 11 Tf"),
-        "Border" => lopdf::Object::Array(vec![0.into(), 0.into(), 0.into()]),
-        "Contents" => contents,
-        "__form__" => lopdf::Object::Stream(stream),
-    }
-}
 
 /// Hand the finished copy to the OS PDF reader (Preview on macOS).
 fn open_in_system_reader(path: &PathBuf) {
@@ -463,13 +379,19 @@ fn pick_pdf() -> Option<PathBuf> {
             return None;
         }
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(s))
-        }
+        if s.is_empty() { None } else { Some(PathBuf::from(s)) }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("zenity")
+            .args(["--file-selection", "--file-filter=PDF files | *.pdf"])
+            .output()
+            .ok()?;
+        if !out.status.success() { return None; }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
     }

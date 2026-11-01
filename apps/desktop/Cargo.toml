@@ -8,6 +8,8 @@ description = "A lightweight Preview-like PDF reader/annotator"
 
 [dependencies]
 pdf-doc = { workspace = true }
+pdf-annot = { workspace = true }
+pdf-typeset = { workspace = true }
 lopdf = { workspace = true }
 pdf-render = { workspace = true }
 eframe = { workspace = true }
