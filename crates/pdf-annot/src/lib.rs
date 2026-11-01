@@ -180,6 +180,116 @@ pub fn free_text_with_appearance(
     }
 }
 
+/// A handwritten signature: a standard `Ink` annotation.
+///
+/// `strokes` are polylines in the appearance's local space, where `(0, 0)` is the
+/// bottom-left of `rect`. Drawing them as a stroked path with round caps keeps the
+/// annotation editable: a user can move or delete it later, and other viewers that
+/// regenerate the appearance still show the same ink.
+pub fn ink(rect: Rect, strokes: &[Vec<(f32, f32)>], bbox: (f32, f32), ink: [f32; 3]) -> PendingAnnotation {
+    // Callers pass strokes in local space; if the declared bbox does not cover them, widen
+    // it. A too-large box squashes nothing but a too-small one clips the ink.
+    let max_x = strokes
+        .iter()
+        .flat_map(|s| s.iter().map(|(x, _)| *x))
+        .fold(0.0f32, f32::max);
+    let max_y = strokes
+        .iter()
+        .flat_map(|s| s.iter().map(|(_, y)| *y))
+        .fold(0.0f32, f32::max);
+    let bbox = (bbox.0.max(max_x).max(1.0), bbox.1.max(max_y).max(1.0));
+    let mut content = String::new();
+    content.push_str(&format!(
+        "q {} {} {} RG 1.6 w 1 J 1 j\n",
+        ink[0], ink[1], ink[2]
+    ));
+    for stroke in strokes {
+        let Some((first, rest)) = stroke.split_first() else {
+            continue;
+        };
+        content.push_str(&format!("{} {} m\n", first.0, first.1));
+        for (x, y) in rest {
+            content.push_str(&format!("{x} {y} l\n"));
+        }
+        content.push_str("S\n");
+    }
+    content.push_str("Q\n");
+
+    // /InkList mirrors the geometry so the annotation stays meaningful when edited.
+    let ink_list = strokes
+        .iter()
+        .map(|stroke| {
+            let nums: Vec<Object> = stroke
+                .iter()
+                .flat_map(|(x, y)| [Object::Real(*x), Object::Real(*y)])
+                .collect();
+            Object::Array(nums)
+        })
+        .collect::<Vec<_>>();
+
+    PendingAnnotation {
+        dict: dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Ink",
+            "Rect" => rect_object(rect),
+            "F" => 4,
+            "C" => Object::Array(vec![
+                Object::Real(ink[0]), Object::Real(ink[1]), Object::Real(ink[2]),
+            ]),
+            "Border" => Object::Array(vec![0.into(), 0.into(), Object::Real(1.6)]),
+            "InkList" => Object::Array(ink_list),
+            "Contents" => Object::string_literal("signature"),
+        },
+        form: form_stream(bbox.0, bbox.1, content),
+    }
+}
+
+/// An image signature: a `Stamp` annotation whose appearance paints an image XObject.
+///
+/// `image_ref` must already exist in the host document as an Image XObject. The image is
+/// stretched to `rect`, which matches how a scanned signature is normally placed.
+pub fn image_stamp(
+    rect: Rect,
+    image_ref: lopdf::ObjectId,
+    image_size: (f32, f32),
+    label: &str,
+) -> PendingAnnotation {
+    let r = normalize(rect);
+    let w = (r[2] - r[0]).max(1.0);
+    let h = (r[3] - r[1]).max(1.0);
+    let (iw, ih) = (image_size.0.max(1.0), image_size.1.max(1.0));
+
+    // `cm` positions the unit image square onto the appearance box.
+    let content = format!("q {w} 0 0 {h} 0 0 cm /Sig Do Q\n");
+    let _ = (iw, ih);
+
+    let mut form = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => Object::Array(vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)]),
+            "Resources" => dictionary! {
+                "XObject" => dictionary! { "Sig" => Object::Reference(image_ref) }
+            },
+            "FormType" => 1,
+        },
+        content.into_bytes(),
+    );
+    let _ = form.compress();
+
+    PendingAnnotation {
+        dict: dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Stamp",
+            "Rect" => rect_object(rect),
+            "F" => 4,
+            "Name" => Object::Name(b"Approved".to_vec()),
+            "Contents" => Object::string_literal(label),
+        },
+        form,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +297,15 @@ mod tests {
     #[test]
     fn normalizes_inverted_rects() {
         assert_eq!(normalize([100.0, 200.0, 50.0, 20.0]), [50.0, 20.0, 100.0, 200.0]);
+    }
+
+    #[test]
+    fn ink_carries_one_path_per_stroke() {
+        let strokes = vec![vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)], vec![(7.0, 8.0), (9.0, 10.0)]];
+        let pending = ink([10.0, 10.0, 60.0, 30.0], &strokes, (50.0, 20.0), [0.1, 0.1, 0.1]);
+        let body = String::from_utf8_lossy(&pending.form.content);
+        assert_eq!(body.matches(" m\n").count(), 2, "one move per stroke");
+        assert!(pending.dict.has(b"InkList"));
     }
 
     #[test]

@@ -11,6 +11,15 @@ use pdf_render::worker::{self, RenderRequest, RenderResult};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
+/// Colour of drawn ink on screen, matching what is written into the PDF.
+fn ink_color() -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (INK[0] * 255.0) as u8,
+        (INK[1] * 255.0) as u8,
+        (INK[2] * 255.0) as u8,
+    )
+}
+
 /// Ink used for annotation artwork and text.
 const INK: [f32; 3] = [0.10, 0.10, 0.10];
 
@@ -76,6 +85,7 @@ enum Tool {
     Select,
     Checkbox,
     Text,
+    Sign,
 }
 
 /// A placed annotation, stored in *visible* page coordinates (top-left origin, points).
@@ -90,6 +100,9 @@ struct Placed {
 enum PlacedKind {
     Checkbox { checked: bool },
     Text { text: String },
+    /// A handwritten signature. Points are in the annotation's local space, origin at the
+    /// bottom-left, matching PDF appearance space.
+    Signature { strokes: Vec<Vec<(f32, f32)>> },
 }
 
 struct App {
@@ -109,6 +122,8 @@ struct App {
     status: String,
     path: Option<PathBuf>,
     fonts: FontSet,
+    /// The stroke being drawn with the Sign tool, in visible page coordinates.
+    current_stroke: Option<Vec<egui::Pos2>>,
 }
 
 impl App {
@@ -131,6 +146,7 @@ impl App {
             path: None,
             // Loading fonts is slow (tens of MB), so do it once at startup.
             fonts: FontSet::from_files(&system_font_candidates()),
+            current_stroke: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -204,6 +220,36 @@ impl App {
         }
     }
 
+/// Convert a screen-space polyline into a placed signature annotation.
+///
+/// The stroke is stored in the annotation's local space with the origin at the bottom-left
+/// so it matches PDF appearance coordinates directly.
+fn finish_stroke(&mut self, page: usize, points: Vec<egui::Pos2>, page_origin: egui::Pos2) {
+    if points.len() < 2 {
+        return;
+    }
+    let xs: Vec<f32> = points.iter().map(|p| p.x).collect();
+    let ys: Vec<f32> = points.iter().map(|p| p.y).collect();
+    let (min_x, max_x) = (xs.iter().cloned().fold(f32::MAX, f32::min), xs.iter().cloned().fold(f32::MIN, f32::max));
+    let (min_y, max_y) = (ys.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MIN, f32::max));
+    // A little padding so the stroke is not clipped by the annotation box.
+    let pad = 3.0;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(min_x - pad, min_y - pad),
+        egui::pos2(max_x + pad, max_y + pad),
+    );
+    let local: Vec<(f32, f32)> = points
+        .iter()
+        .map(|p| (p.x - rect.min.x, rect.max.y - p.y))
+        .collect();
+    let _ = page_origin;
+    self.placed.push(Placed {
+        page,
+        rect,
+        kind: PlacedKind::Signature { strokes: vec![local] },
+    });
+}
+
     fn save_copy(&mut self) {
         let Some(doc) = &mut self.doc else {
             self.status = "No document is open".to_owned();
@@ -234,7 +280,7 @@ impl App {
 /// the appearance streams and the save path without a GUI.
 fn demo_annotations(doc: &PdfDocument) -> Vec<Placed> {
     let box0 = doc.page_box(0).unwrap_or(PageBox { x0: 0.0, y0: 0.0, x1: 612.0, y1: 792.0 });
-    let w = box0.width();
+    let _ = box0;
     vec![
         Placed {
             page: 0,
@@ -248,10 +294,21 @@ fn demo_annotations(doc: &PdfDocument) -> Vec<Placed> {
         },
         Placed {
             page: 0,
-            rect: egui::Rect::from_min_size(
-                egui::pos2(40.0, 70.0),
-                egui::vec2(w.min(300.0), 22.0),
-            ),
+            // Sized to the strokes themselves; the appearance box matches the annotation box.
+            rect: egui::Rect::from_min_size(egui::pos2(40.0, 70.0), egui::vec2(40.0, 20.0)),
+            kind: PlacedKind::Signature {
+                // A small "scribble": two strokes, enough to prove Ink round-trips.
+                strokes: vec![
+                    vec![
+                        (2.0, 4.0), (10.0, 16.0), (18.0, 4.0), (26.0, 16.0), (34.0, 4.0),
+                    ],
+                    vec![(6.0, 11.0), (30.0, 11.0)],
+                ],
+            },
+        },
+        Placed {
+            page: 0,
+            rect: egui::Rect::from_min_size(egui::pos2(90.0, 38.0), egui::vec2(220.0, 16.0)),
             kind: PlacedKind::Text {
                 // CJK + Latin on purpose: this exercises the embedded-subset-font path.
                 text: std::env::var("SELFTEST_TEXT")
@@ -282,6 +339,14 @@ fn write_annotations(
         match &item.kind {
             PlacedKind::Checkbox { checked } => {
                 let pending = pdf_annot::checkbox(rect, *checked, INK);
+                attach(doc, page_id, pending, None);
+            }
+            PlacedKind::Signature { strokes } => {
+                // Strokes are already in the annotation's local space, so the appearance box
+                // is exactly the annotation box.
+                let width = (rect[2] - rect[0]).max(1.0);
+                let height = (rect[3] - rect[1]).max(1.0);
+                let pending = pdf_annot::ink(rect, strokes, (width, height), INK);
                 attach(doc, page_id, pending, None);
             }
             PlacedKind::Text { text } => {
@@ -413,6 +478,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tool, Tool::Select, "Select");
                 ui.selectable_value(&mut self.tool, Tool::Checkbox, "Checkbox");
                 ui.selectable_value(&mut self.tool, Tool::Text, "Text");
+                ui.selectable_value(&mut self.tool, Tool::Sign, "Sign");
                 ui.separator();
                 if ui.button("-").clicked() {
                     self.zoom = (self.zoom - 0.2).max(0.4);
@@ -499,6 +565,22 @@ impl eframe::App for App {
                             toggle = Some(i);
                         }
                     }
+                    PlacedKind::Signature { strokes } => {
+                        let p = ui.painter();
+                        let stroke = egui::Stroke::new(1.6, ink_color());
+                        for line in strokes {
+                            let pts: Vec<egui::Pos2> = line
+                                .iter()
+                                .map(|(x, y)| {
+                                    // Local y grows upward; the screen grows downward.
+                                    egui::pos2(r.min.x + x, r.max.y - y)
+                                })
+                                .collect();
+                            if pts.len() >= 2 {
+                                p.add(egui::Shape::line(pts, stroke));
+                            }
+                        }
+                    }
                     PlacedKind::Text { text } => {
                         ui.painter()
                             .rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 235));
@@ -516,6 +598,30 @@ impl eframe::App for App {
                 if let PlacedKind::Checkbox { checked } = &mut self.placed[i].kind {
                     *checked = !*checked;
                 }
+            }
+
+            // Signing: drag to draw a stroke; releasing seals it into an annotation.
+            if self.tool == Tool::Sign {
+                let painter = ui.painter();
+                if response.dragged() || response.dragged_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        self.current_stroke.get_or_insert_with(Vec::new).push(pos);
+                    }
+                }
+                if let Some(points) = &self.current_stroke {
+                    if points.len() >= 2 {
+                        painter.add(egui::Shape::line(
+                            points.clone(),
+                            egui::Stroke::new(1.6, ink_color()),
+                        ));
+                    }
+                }
+                if response.drag_stopped() {
+                    if let Some(points) = self.current_stroke.take() {
+                        self.finish_stroke(page_now, points, rect.min);
+                    }
+                }
+                return;
             }
 
             // Placement: click on the page while a drawing tool is active.
@@ -536,7 +642,7 @@ impl eframe::App for App {
                                 text: "Signature checked 2026-11-01".to_owned(),
                             },
                         }),
-                        Tool::Select => {}
+                        Tool::Select | Tool::Sign => {}
                     }
                 }
             }
