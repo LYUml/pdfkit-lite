@@ -86,6 +86,7 @@ enum Tool {
     Checkbox,
     Text,
     Sign,
+    PlaceImage,
 }
 
 /// A placed annotation, stored in *visible* page coordinates (top-left origin, points).
@@ -103,6 +104,8 @@ enum PlacedKind {
     /// A handwritten signature. Points are in the annotation's local space, origin at the
     /// bottom-left, matching PDF appearance space.
     Signature { strokes: Vec<Vec<(f32, f32)>> },
+    /// An image signature (a scanned or exported PNG with transparency).
+    ImageSignature { image: std::sync::Arc<pdf_annot::RgbaImage> },
 }
 
 struct App {
@@ -126,6 +129,8 @@ struct App {
     current_stroke: Option<Vec<egui::Pos2>>,
     /// Index of the text annotation currently being edited inline.
     editing_text: Option<usize>,
+    /// Image to place with the PlaceImage tool, loaded once and reused.
+    stamp_image: Option<std::sync::Arc<pdf_annot::RgbaImage>>,
 }
 
 impl App {
@@ -150,6 +155,7 @@ impl App {
             fonts: FontSet::from_files(&system_font_candidates()),
             current_stroke: None,
             editing_text: None,
+            stamp_image: None,
         };
         if let Some(p) = path {
             app.open(p);
@@ -352,6 +358,19 @@ fn write_annotations(
                 let pending = pdf_annot::ink(rect, strokes, (width, height), INK);
                 attach(doc, page_id, pending, None);
             }
+            PlacedKind::ImageSignature { image } => {
+                let image_ref = pdf_annot::add_image_xobject(doc.document_mut(), image);
+                let w = (rect[2] - rect[0]).max(1.0);
+                let h = (rect[3] - rect[1]).max(1.0);
+                let pending = pdf_annot::image_stamp(
+                    rect,
+                    image_ref,
+                    (image.width as f32, image.height as f32),
+                    "signature",
+                );
+                let _ = (w, h);
+                attach(doc, page_id, pending, None);
+            }
             PlacedKind::Text { text } => {
                 let width = (rect[2] - rect[0]).max(40.0);
                 // Typeset the text with Typst: this is what makes CJK work, because the
@@ -465,6 +484,39 @@ fn pick_pdf() -> Option<PathBuf> {
     }
 }
 
+/// Native picker for signature images.
+fn pick_png() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose file with prompt \"Choose a PNG\" of type {\"public.png\"})",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("zenity")
+            .args(["--file-selection", "--file-filter=PNG files | *.png"])
+            .output()
+            .ok()?;
+        if !out.status.success() { return None; }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_render();
@@ -482,6 +534,27 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tool, Tool::Checkbox, "Checkbox");
                 ui.selectable_value(&mut self.tool, Tool::Text, "Text");
                 ui.selectable_value(&mut self.tool, Tool::Sign, "Sign");
+                if ui.button("Load image").clicked() {
+                    if let Some(path) = pick_png() {
+                        match std::fs::read(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|b| pdf_annot::RgbaImage::from_png(&b).map_err(|e| e.to_string()))
+                        {
+                            Ok(img) => {
+                                self.status = format!("Loaded {}", path.display());
+                                self.stamp_image = Some(std::sync::Arc::new(img));
+                            }
+                            Err(e) => self.status = format!("Could not load image: {e}"),
+                        }
+                    }
+                }
+                let has_image = self.stamp_image.is_some();
+                if ui
+                    .add_enabled(has_image, egui::Button::selectable(self.tool == Tool::PlaceImage, "Place image"))
+                    .clicked()
+                {
+                    self.tool = Tool::PlaceImage;
+                }
                 ui.separator();
                 if ui.button("-").clicked() {
                     self.zoom = (self.zoom - 0.2).max(0.4);
@@ -586,6 +659,29 @@ impl eframe::App for App {
                                 p.add(egui::Shape::line(pts, stroke));
                             }
                         }
+                    }
+                    PlacedKind::ImageSignature { image } => {
+                        // Drawing the actual bitmap here would need a texture per image; a
+                        // labelled placeholder keeps the overlay honest until the PDF is
+                        // reloaded.
+                        ui.painter().rect_filled(
+                            r,
+                            2.0,
+                            egui::Color32::from_rgba_unmultiplied(60, 130, 220, 40),
+                        );
+                        ui.painter().rect_stroke(
+                            r,
+                            2.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 130, 220)),
+                            egui::StrokeKind::Middle,
+                        );
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("image {}x{}", image.width, image.height),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(40, 90, 160),
+                        );
                     }
                     PlacedKind::Text { text } => {
                         // A lightweight inline editor: double-click to edit, Enter or click
@@ -724,6 +820,25 @@ impl eframe::App for App {
                                 // Drop straight into editing: an empty box is useless.
                                 self.editing_text = Some(idx);
                                 self.tool = Tool::Select;
+                            }
+                            Tool::PlaceImage => {
+                                if let Some(image) = &self.stamp_image {
+                                    let w = 180.0f32;
+                                    let h = w * (image.height as f32 / image.width.max(1) as f32);
+                                    self.placed.push(Placed {
+                                        page: page_now,
+                                        rect: egui::Rect::from_min_size(
+                                            top_left,
+                                            egui::vec2(w, h),
+                                        ),
+                                        kind: PlacedKind::ImageSignature {
+                                            image: std::sync::Arc::clone(image),
+                                        },
+                                    });
+                                    self.tool = Tool::Select;
+                                } else {
+                                    self.status = "Load a PNG first".to_owned();
+                                }
                             }
                             Tool::Select | Tool::Sign => {}
                         }

@@ -15,6 +15,9 @@
 //! 5. Appearance coordinates are PDF user space (origin bottom-left, y up) while a UI is
 //!    usually top-left origin with y down. Convert once, at the boundary.
 
+mod image;
+pub use image::{ImageError, RgbaImage, add_image_xobject, resources_with_image};
+
 use lopdf::{Dictionary, Object, Stream, dictionary};
 
 /// A rectangle in PDF user space.

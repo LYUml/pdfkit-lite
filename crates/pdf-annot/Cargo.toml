@@ -8,6 +8,7 @@ description = "Standard PDF annotations (checkbox, text) with appearance streams
 
 [dependencies]
 lopdf = { workspace = true }
+png = "0.18"
 thiserror = { workspace = true }
 
 [lints]
