@@ -1,0 +1,17 @@
+[package]
+name = "pdf-typeset"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Typeset annotation text with the embedded Typst engine (CJK-capable, pure Rust)"
+
+[dependencies]
+typst = "0.15"
+typst-layout = "0.15"
+typst-pdf = "0.15"
+lopdf = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

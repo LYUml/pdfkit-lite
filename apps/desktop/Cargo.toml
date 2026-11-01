@@ -1,0 +1,21 @@
+[package]
+name = "pdfkit-lite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A lightweight Preview-like PDF reader/annotator"
+
+[dependencies]
+pdf-doc = { workspace = true }
+lopdf = { workspace = true }
+pdf-render = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+
+[[bin]]
+name = "pdfkit-lite"
+path = "src/main.rs"
+
+[lints]
+workspace = true

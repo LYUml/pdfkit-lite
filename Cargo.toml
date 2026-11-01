@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pdf-doc",
+    "crates/pdf-render",
+    "crates/pdf-font",
+    "crates/pdf-typeset",
+    "crates/pdf-annot",
+    "apps/desktop",
+]
+default-members = ["apps/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[workspace.dependencies]
+pdf-doc = { path = "crates/pdf-doc" }
+pdf-render = { path = "crates/pdf-render" }
+pdf-font = { path = "crates/pdf-font" }
+pdf-typeset = { path = "crates/pdf-typeset" }
+pdf-annot = { path = "crates/pdf-annot" }
+
+hayro = "0.8"
+lopdf = { version = "0.46", default-features = false }
+ttf-parser = "0.25"
+subsetter = "0.2"
+thiserror = "2"
+eframe = "0.37"
+egui = "0.37"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"

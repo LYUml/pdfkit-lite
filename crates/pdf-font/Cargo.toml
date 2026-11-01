@@ -1,0 +1,15 @@
+[package]
+name = "pdf-font"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Font discovery, subsetting and PDF embedding for CJK text"
+
+[dependencies]
+ttf-parser = { workspace = true }
+subsetter = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "pdf-annot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Standard PDF annotations (checkbox, text) with appearance streams"
+
+[dependencies]
+lopdf = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

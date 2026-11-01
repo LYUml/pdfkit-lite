@@ -1,0 +1,14 @@
+[package]
+name = "pdf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-Rust PDF page rasterization (hayro)"
+
+[dependencies]
+hayro = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

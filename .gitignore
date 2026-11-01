@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# The sibling research/skill repositories are cloned tooling, not part of this crate.
+/reverse-skill/
+/work/
+
+.DS_Store
