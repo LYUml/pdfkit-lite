@@ -196,6 +196,19 @@ next person does not rediscover them.
 
 ---
 
+## 5.1 Interaction rules that only show up in real use
+
+Two more rules, found by driving the running app rather than by reading code:
+
+- **A double-click is two clicks.** Placing a new annotation on `Response::clicked()`
+  means the second click of a double-click drops a duplicate. Guard placement with
+  `!response.double_clicked()`, and treat a click that lands inside an existing annotation
+  as belonging to that annotation.
+- **Switch back to the select tool after placing.** Otherwise the next click, meant to
+  inspect what was just added, adds another one.
+
+Neither is visible in a unit test; both were obvious within seconds of clicking around.
+
 ## 6. Projects worth borrowing from
 
 | Project | Licence | Size | What to reuse | Distance to us |

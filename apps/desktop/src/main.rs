@@ -682,23 +682,51 @@ impl eframe::App for App {
                 return;
             }
 
-            // Placement: click on the page while a drawing tool is active.
-            if response.clicked() && self.tool != Tool::Select {
+            // Placement: single click on the page while a drawing tool is active.
+            //
+            // Two guards, both learned the hard way:
+            // 1. Double-click on an existing annotation belongs to that annotation (it opens
+            //    its editor), so a click landing inside one must not create a new one.
+            // 2. Only a *single* click places anything; otherwise the second click of a
+            //    double-click would drop a duplicate.
+            let clicked_empty_space = response.clicked()
+                && !response.double_clicked()
+                && self.tool != Tool::Select;
+            if clicked_empty_space {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    let local = pos - rect.min;
-                    let top_left = rect.min + local;
-                    match self.tool {
-                        Tool::Checkbox => self.placed.push(Placed {
-                            page: page_now,
-                            rect: egui::Rect::from_min_size(top_left, egui::vec2(16.0, 16.0)),
-                            kind: PlacedKind::Checkbox { checked: true },
-                        }),
-                        Tool::Text => self.placed.push(Placed {
-                            page: page_now,
-                            rect: egui::Rect::from_min_size(top_left, egui::vec2(180.0, 22.0)),
-                            kind: PlacedKind::Text { text: String::new() },
-                        }),
-                        Tool::Select | Tool::Sign => {}
+                    let hit_existing = self.placed.iter().any(|p| {
+                        p.page == page_now
+                            && egui::Rect::from_min_size(
+                                rect.min + p.rect.min.to_vec2(),
+                                p.rect.size(),
+                            )
+                            .expand(2.0)
+                            .contains(pos)
+                    });
+                    if !hit_existing {
+                        let top_left = pos;
+                        match self.tool {
+                            Tool::Checkbox => self.placed.push(Placed {
+                                page: page_now,
+                                rect: egui::Rect::from_min_size(top_left, egui::vec2(16.0, 16.0)),
+                                kind: PlacedKind::Checkbox { checked: true },
+                            }),
+                            Tool::Text => {
+                                let idx = self.placed.len();
+                                self.placed.push(Placed {
+                                    page: page_now,
+                                    rect: egui::Rect::from_min_size(
+                                        top_left,
+                                        egui::vec2(180.0, 22.0),
+                                    ),
+                                    kind: PlacedKind::Text { text: String::new() },
+                                });
+                                // Drop straight into editing: an empty box is useless.
+                                self.editing_text = Some(idx);
+                                self.tool = Tool::Select;
+                            }
+                            Tool::Select | Tool::Sign => {}
+                        }
                     }
                 }
             }
