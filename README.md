@@ -15,7 +15,9 @@ Early skeleton. The render-and-annotate loop works end to end; see
 - Open a PDF from the command line or the system file picker
 - Render pages off the UI thread, so the window stays responsive
 - Place checkboxes, toggle them, and save them as standard PDF `Square` annotations
-- Place text boxes as standard PDF `FreeText` annotations
+- Place text boxes as standard PDF `FreeText` annotations; text is typeset by
+  Typst, so Chinese, Japanese and Korean display correctly with embedded fonts
+- Draw handwritten signatures as standard PDF `Ink` annotations
 - Save a **copy** (`<name>-edited.pdf`) and never overwrite the original
 - Hand the result to the system PDF reader (Preview on macOS)
 - `--selftest` mode for headless verification
@@ -76,14 +78,27 @@ version:
 5. Appearance space has its origin at the bottom-left with y pointing up, while
    most UIs use top-left with y down.
 
+## Verified across renderers
+
+The same document renders identically under PDFium and under Apple's own PDF
+renderer (the one Preview uses), checked through Quick Look: checkboxes, CJK
+text and ink signatures all display.
+
 ## Limitations
 
-- Text boxes carry a fixed ASCII placeholder; CJK text needs the typesetting
-  path, which is in progress
+- Text boxes carry a fixed placeholder; there is no text input UI yet
+- Signed as a *visual* signature, not a cryptographic one. See the note below
 - Encrypted PDFs are not supported (a hayro limitation)
 - No undo, no dragging annotations, no deletion
 - No thumbnail sidebar and no continuous scrolling; one page at a time
 - `pdf-font` is a placeholder crate
+
+## On signatures
+
+What we write is a visual signature: an `Ink` annotation that looks like a
+signature. It is **not** a cryptographic digital signature and carries no
+tamper evidence. For legally binding e-signatures, use PAdES / CAdES with a
+certificate instead.
 
 ## License
 
